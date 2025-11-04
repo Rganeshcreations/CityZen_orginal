@@ -1,0 +1,103 @@
+/**
+ * @fileoverview Firestore Security Rules for the application.
+ *
+ * Core Philosophy:
+ * This ruleset enforces a user-ownership model for user profiles and cart data,
+ * and allows public read access to products while restricting write access to merchants.
+ * Orders are also protected, ensuring only the associated user can access them.
+ *
+ * Data Structure:
+ * - /users/{userId}: Stores user profile information.
+ * - /products/{productId}: Stores product information.
+ * - /users/{userId}/cart/{cartItemId}: Stores cart items for each user.
+ * - /orders/{orderId}: Stores order information.
+ *
+ * Key Security Decisions:
+ * - Users can only read and write their own profile data.
+ * - Products are publicly readable, but only merchants can create, update, or delete them (this is not fully implemented yet).
+ * - Users can only manage their own cart items.
+ * - Users can only access their own order data.
+ * - Listing of users is disallowed.
+ *
+ * Denormalization for Authorization:
+ *  - The `Product` entity should ideally include a `storeVisible` field, copied from the associated `UserProfile`,
+ *    to enable efficient filtering of products based on merchant status.  This is not implemented in the current data model.
+ *
+ * Structural Segregation:
+ *  - No structural segregation is applied. All data is stored in a single Firestore database.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * @description Controls access to user profile documents.
+     * @path /users/{userId}
+     * @allow (create) User with matching UID can create their profile.
+     * @allow (get, update, delete) User with matching UID can access their profile.
+     * @deny (create) User cannot create a profile with a different UID.
+     * @deny (get, update, delete) User cannot access other user profiles.
+     * @deny (list) Listing all users is not allowed.
+     * @principle Enforces document ownership for user profiles.
+     */
+    match /users/{userId} {
+      function isOwner(userId) {
+        return request.auth != null && request.auth.uid == userId;
+      }
+
+      allow get, update, delete: if isOwner(userId);
+      allow create: if isSelfCreate(userId);
+      allow list: if false;
+
+      function isSelfCreate(userId) {
+        return request.auth != null && request.auth.uid == userId && request.resource.data.uid == userId;
+      }
+    }
+
+    /**
+     * @description Controls access to product documents.
+     * @path /products/{productId}
+     * @allow (get, list) Products are publicly readable.
+     * @deny (create, update, delete) Only merchants should be able to manage products.  This is not yet fully implemented
+     * @principle Public read, restricted write for products.
+     */
+    match /products/{productId} {
+      allow get, list: if true;
+      allow create, update, delete: if false; // TODO: Add merchant role check for product management
+    }
+
+    /**
+     * @description Controls access to cart items within a user's cart.
+     * @path /users/{userId}/cart/{cartItemId}
+     * @allow (create, get, update, delete, list) User with matching UID can manage their cart items.
+     * @deny (create, get, update, delete, list) User cannot access other user carts.
+     * @principle Enforces document ownership for cart items.
+     */
+    match /users/{userId}/cart/{cartItemId} {
+      function isOwner(userId) {
+        return request.auth != null && request.auth.uid == userId;
+      }
+      allow get, update, delete, list: if isOwner(userId);
+      allow create: if request.auth.uid == userId; //owner can create in his own cart
+    }
+
+    /**
+     * @description Controls access to order documents.
+     * @path /orders/{orderId}
+     * @allow (get, list) User with matching UID can access their order.
+     * @deny (create, update, delete) Orders should be created and managed via backend functions.
+     * @deny (get, list) User cannot access other user orders.
+     * @principle Enforces document ownership for orders.
+     */
+    match /orders/{orderId} {
+      function isOrderOwner(order) {
+        return request.auth != null && request.auth.uid == resource.data.userId;
+      }
+
+      allow get: if isOrderOwner(request.auth.uid);
+      allow list: if request.auth.uid == resource.data.userId; // List all orders by user is not implemented
+
+      allow create, update, delete: if false; // Orders are handled by backend
+    }
+  }
+}
